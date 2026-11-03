@@ -52,6 +52,7 @@ window.__ModuleLoader__.load({
       overlayExit: 'dsh-anim-overlay-exit',
       pageEnter: 'dsh-anim-page-enter',
       sectionEnter: 'dsh-anim-section-enter',
+      sectionBlur: 'dsh-anim-section-blur',
       chevron: 'dsh-anim-chevron-in',
       chevronOut: 'dsh-anim-chevron-out',
     }
@@ -118,6 +119,14 @@ window.__ModuleLoader__.load({
         from { opacity: 1; transform: scale(1); }
         to { opacity: 0; transform: scale(0.99); }
       }
+      @keyframes dsh-anim-section-blur {
+        from { filter: blur(6px); }
+        to { filter: blur(0); }
+      }
+      .${CLS.sectionBlur} {
+        animation: dsh-anim-section-blur 240ms var(--dsh-anim-ease) both !important;
+      }
+
       @keyframes dsh-anim-chevron-in {
         from { transform: rotate(180deg); }
         to { transform: rotate(0deg); }
@@ -241,7 +250,8 @@ window.__ModuleLoader__.load({
         .${CLS.overlayEnter},
         .${CLS.overlayExit},
         .${CLS.pageEnter},
-        .${CLS.sectionEnter} {
+        .${CLS.sectionEnter},
+        .${CLS.sectionBlur} {
           animation: none !important;
           transition: none !important;
         }
@@ -293,6 +303,7 @@ window.__ModuleLoader__.load({
       const styleTimers = new WeakMap()
       const revealStates = new Map()
       const settingsObservers = new Map()
+      const settingsSectionSurfaces = new Map()
       const menuMeta = new Map()
       const dialogMeta = new WeakMap()
       const activeMenus = new Set()
@@ -696,16 +707,6 @@ window.__ModuleLoader__.load({
         if (!(target instanceof Element)) return
         const collapsing = (element) => element.getAttribute(MOTION_SCOPE) === 'collapse'
 
-        // Settings navigation swaps one section owner inside a stable wrapper;
-        // animate on the next frame, after React has committed the new page.
-        const settingsNav = target.closest('[data-shortcut-modal="settings"] nav button')
-        if (settingsNav instanceof HTMLElement) {
-          const panel = settingsNav.closest('[data-shortcut-modal="settings"]')
-          if (panel instanceof HTMLElement) {
-            requestAnimationFrame(() => requestAnimationFrame(() => animateSettingsSection(panel)))
-          }
-        }
-
         // Whole-Turn process summary: only the chevron flourish is ours.
         // Opening and closing the outer fold are left entirely to DSH. A
         // custom height/margin animation fought the transcript's scroll, and a
@@ -983,29 +984,40 @@ window.__ModuleLoader__.load({
         const content = panel.lastElementChild
         const options = content?.lastElementChild
         if (!(options instanceof HTMLElement)) return
+        let pending = false
         const observer = new MutationObserver(() => {
-          if (!disposed) animateSettingsSection(panel)
+          if (disposed || pending) return
+          pending = true
+          requestAnimationFrame(() => {
+            pending = false
+            if (!disposed) animateSettingsSection(panel)
+          })
         })
-        observer.observe(options, { childList: true })
+        observer.observe(options, { childList: true, subtree: true })
         settingsObservers.set(panel, observer)
         animateSettingsSection(panel)
       }
 
-      /** @param {HTMLElement} panel */
+      /**
+       * Blur the new section into focus, keeping opacity at 1 so the pane never
+       * goes blank (the old fade was what read as a flash). Identity dedupe
+       * keeps async row updates from restarting the blur.
+       * @param {HTMLElement} panel
+       */
       function animateSettingsSection(panel) {
         if (disposed || reducedMotion() || !panel.isConnected) return
         const outlet = panel.querySelector('[data-slot="settings.section"]')
-        if (outlet instanceof HTMLElement) {
-          const surface = visibleSurface(outlet)
-          if (surface !== null) {
-            playClassOnce(surface, CLS.sectionEnter, T.pageBlur + 60)
-            return
-          }
+        let surface = outlet instanceof HTMLElement ? visibleSurface(outlet) : null
+        if (surface === null) {
+          const content = panel.lastElementChild
+          const options = content?.lastElementChild
+          const first = options?.firstElementChild
+          surface = first instanceof HTMLElement ? visibleSurface(first) : null
         }
-        const content = panel.lastElementChild
-        const options = content?.lastElementChild
-        const first = options?.firstElementChild
-        if (first instanceof HTMLElement) animateSection(first)
+        if (surface === null) return
+        if (settingsSectionSurfaces.get(panel) === surface) return
+        settingsSectionSurfaces.set(panel, surface)
+        playClassOnce(surface, CLS.sectionBlur, 300)
       }
 
       /** @param {HTMLElement} panel */
@@ -1014,6 +1026,7 @@ window.__ModuleLoader__.load({
         if (observer === undefined) return
         observer.disconnect()
         settingsObservers.delete(panel)
+        settingsSectionSurfaces.delete(panel)
       }
 
       /**
@@ -1302,10 +1315,11 @@ window.__ModuleLoader__.load({
         for (const panel of activeDialogs) {
           panel.classList.remove(CLS.dialogEnter, CLS.dialogExit)
           panel.style.animation = ''
-          disconnectSettingsSections(panel)
         }
         activeDialogs.clear()
         for (const observer of settingsObservers.values()) observer.disconnect()
+        settingsObservers.clear()
+        settingsSectionSurfaces.clear()
         if (styleEl !== null) styleEl.remove()
       }
 
