@@ -320,7 +320,6 @@ window.__ModuleLoader__.load({
       let hiddenObserver
       let mainObserver
       let sidebarObserver
-      let sessionObserver
       let menuRoleObserver
       let mainSlot = null
       let sidebarSlot = null
@@ -1049,15 +1048,6 @@ window.__ModuleLoader__.load({
       }
 
       /** @param {HTMLElement} element */
-      function animateSessionSwitch(element) {
-        if (disposed || reducedMotion()) return
-        requestAnimationFrame(() => {
-          if (disposed || !element.isConnected) return
-          playClassOnce(element, CLS.sectionEnter, T.pageBlur + 60)
-        })
-      }
-
-      /** @param {HTMLElement} element */
       function animatePage(element) {
         if (disposed || reducedMotion()) return
         const surface = visibleSurface(element)
@@ -1217,26 +1207,6 @@ window.__ModuleLoader__.load({
           subtree: true,
         })
 
-        // Session switching keeps the conversation shell mounted and swaps the
-        // `data-conversation-session` identity. Fade the new transcript in
-        // without touching the resident header.
-        sessionObserver = new MutationObserver(records => {
-          for (const record of records) {
-            const target = record.target
-            if (!(target instanceof HTMLElement) || !target.hasAttribute('data-conversation-content')) continue
-            const previous = record.oldValue
-            const next = target.getAttribute('data-conversation-session')
-            if (previous === null || next === null || previous === next) continue
-            animateSessionSwitch(target)
-          }
-        })
-        sessionObserver.observe(document.documentElement, {
-          attributes: true,
-          attributeFilter: ['data-conversation-session'],
-          subtree: true,
-          attributeOldValue: true,
-        })
-
         // Model select and similar menus swap role="menu" ↔ role="group" on
         // the same surface when drilling; redraw the card with the reveal.
         menuRoleObserver = new MutationObserver(records => {
@@ -1276,13 +1246,11 @@ window.__ModuleLoader__.load({
         hiddenObserver?.disconnect()
         mainObserver?.disconnect()
         sidebarObserver?.disconnect()
-        sessionObserver?.disconnect()
         menuRoleObserver?.disconnect()
         bodyObserver = undefined
         hiddenObserver = undefined
         mainObserver = undefined
         sidebarObserver = undefined
-        sessionObserver = undefined
         menuRoleObserver = undefined
         if (bootListener !== undefined) {
           document.removeEventListener('DOMContentLoaded', bootListener)
