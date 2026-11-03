@@ -1,0 +1,4 @@
+[submodule "dsh-mermaid"]
+	path = dsh-mermaid
+	url = https://github.com/gmjneko/dsh-mermaid.git
+	shallow = true
