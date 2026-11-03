@@ -706,27 +706,15 @@ window.__ModuleLoader__.load({
           }
         }
 
-        // Whole-Turn process summary: collapse the step groups before React hides them.
+        // Whole-Turn process summary: opening is React's job and gets the
+        // chevron flourish. Closing is left to DSH's native fold: a multi-phase
+        // custom height/margin animation fights the transcript's scroll and
+        // layout settling, producing overshoot/rebound. In-step groups keep
+        // their own animation below.
         const turnButton = target.closest('button[data-turn-process]')
-        if (turnButton instanceof HTMLElement && !turnButton.disabled) {
-          if (turnButton.getAttribute('aria-expanded') === 'true') {
-            const groups = visibleGroups(turnButton)
-            if (groups.some(group => collapsing(group))) {
-              event.preventDefault()
-              event.stopImmediatePropagation()
-              return
-            }
-            if (groups.length > 0 && !groups.some(group => group.closest(CHAT_MOTION_SCOPE) !== null)) {
-              event.preventDefault()
-              event.stopImmediatePropagation()
-              playChevronOut(turnButton)
-              collapseMany(groups, () => replayClick(turnButton))
-              return
-            }
-          } else {
-            // Opening is React's job; just rotate the new chevron once it lands.
-            requestAnimationFrame(() => playChevron(turnButton))
-          }
+        if (turnButton instanceof HTMLElement && !turnButton.disabled
+          && turnButton.getAttribute('aria-expanded') !== 'true') {
+          requestAnimationFrame(() => playChevron(turnButton))
         }
 
         // One process group: collapse its capped body.
