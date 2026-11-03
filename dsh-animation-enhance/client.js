@@ -706,11 +706,12 @@ window.__ModuleLoader__.load({
           }
         }
 
-        // Whole-Turn process summary: opening is React's job and gets the
-        // chevron flourish. Closing is left to DSH's native fold: a multi-phase
-        // custom height/margin animation fights the transcript's scroll and
-        // layout settling, producing overshoot/rebound. In-step groups keep
-        // their own animation below.
+        // Whole-Turn process summary: only the chevron flourish is ours.
+        // Opening and closing the outer fold are left entirely to DSH. A
+        // custom height/margin animation fought the transcript's scroll, and a
+        // View Transition repainted the whole page (it read as a reload), so
+        // native instant folding is the stable contract here. In-step groups
+        // keep their own animation below.
         const turnButton = target.closest('button[data-turn-process]')
         if (turnButton instanceof HTMLElement && !turnButton.disabled
           && turnButton.getAttribute('aria-expanded') !== 'true') {
@@ -765,18 +766,6 @@ window.__ModuleLoader__.load({
             collapseMany(content.filter(isElement), () => replayClick(toggle))
           }
         }
-      }
-
-      /** @param {HTMLElement} button */
-      function visibleGroups(button) {
-        const turn = button.getAttribute('data-turn-process')
-        if (turn === null || turn === '') return []
-        const selector = `${STEP_PROCESS}[data-chat-turn="${escapeAttribute(turn)}"]`
-        return Array.from(document.querySelectorAll(selector)).filter(group =>
-          group instanceof HTMLElement
-          && !group.hasAttribute('hidden')
-          && group.closest('[hidden]') === null
-          && group.getBoundingClientRect().height > 0)
       }
 
       /** @param {HTMLElement} element */
