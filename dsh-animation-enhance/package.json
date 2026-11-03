@@ -3,7 +3,7 @@
   "version": "1.3.9",
   "private": true,
   "type": "module",
-  "description": "KoWork-style motion for DeepSeek Harness: step disclosures, menus, settings, and panel switches.",
+  "description": "DouBao-style motion for DeepSeek Harness: step disclosures, menus, settings, and panel switches.",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
