@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-font-enhance
+      name: '@local/dsh-font-enhance'
