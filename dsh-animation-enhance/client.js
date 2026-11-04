@@ -51,10 +51,10 @@ window.__ModuleLoader__.load({
       overlayEnter: 'dsh-anim-overlay-enter',
       overlayExit: 'dsh-anim-overlay-exit',
       pageEnter: 'dsh-anim-page-enter',
+      pageFade: 'dsh-anim-page-fade',
       sectionEnter: 'dsh-anim-section-enter',
       sectionBlur: 'dsh-anim-section-blur',
-      chevron: 'dsh-anim-chevron-in',
-      chevronOut: 'dsh-anim-chevron-out',
+      menuSurface: 'dsh-anim-menu-surface',
     }
 
     const MENU_SELECTOR = '[data-menu-material]'
@@ -64,6 +64,10 @@ window.__ModuleLoader__.load({
     const STEP_PROCESS = '[data-step-process]'
     const STEP_PROCESS_BODY = '[data-step-process-body]'
     const CHAT_MOTION_SCOPE = '[data-chat-motion]'
+    const CHEVRON_SELECTOR = '[data-step-process-chevron], [data-disclosure-chevron], [data-chevron]'
+    // `filter` repaints the whole subtree every frame; only pay for it on small
+    // surfaces and fall back to a plain fade on long transcripts.
+    const BLUR_NODE_BUDGET = 500
     const STYLE_ID = 'dsh-animation-enhance-styles'
     const MOTION_SCOPE = 'data-dsh-anim'
     const RUNTIME_KEY = '__dshAnimationEnhanceRuntime__'
@@ -127,15 +131,6 @@ window.__ModuleLoader__.load({
         animation: dsh-anim-section-blur 240ms var(--dsh-anim-ease) both !important;
       }
 
-      @keyframes dsh-anim-chevron-in {
-        from { transform: rotate(180deg); }
-        to { transform: rotate(0deg); }
-      }
-      @keyframes dsh-anim-chevron-out {
-        from { transform: rotate(0deg); }
-        to { transform: rotate(180deg); }
-      }
-
       /* KoWork's Disclosure.Content transition: the content box owns its height
          and rides height/opacity/filter/translate on one curve. */
       .${CLS.disclosure} {
@@ -150,24 +145,14 @@ window.__ModuleLoader__.load({
           transform var(--dsh-anim-disclosure-height) var(--dsh-anim-ease) !important;
       }
 
-      .${CLS.chevron},
-      .${CLS.chevronOut} {
-        transform-box: fill-box;
-        transform-origin: center;
-      }
-      .${CLS.chevron} {
-        animation: dsh-anim-chevron-in ${T.chevron}ms var(--dsh-anim-ease) both !important;
-      }
-      .${CLS.chevronOut} {
-        animation: dsh-anim-chevron-out ${T.chevron}ms var(--dsh-anim-ease) both !important;
-      }
-
       /* The user prefers a full-card blur-to-clear reveal over the native
          background blur. Opaque the menu material and hide the macOS backing
          first: with no backdrop-filter to preserve, the surface can safely
          animate filter/opacity/scale without a white flash or a detached
-         backing rectangle. */
-      [data-menu-material] > [aria-hidden="true"] {
+         backing rectangle. The class is added by this plugin to the menus it
+         animates and must stay for the menu's whole lifetime: dropping it when
+         the animation ends would pop the translucent material back mid-open. */
+      .${CLS.menuSurface} > [aria-hidden="true"] {
         -webkit-backdrop-filter: none !important;
         backdrop-filter: none !important;
         background: var(--dsw-alias-bg-layer-2, var(--dsw-alias-bg-base, #fff)) !important;
@@ -232,15 +217,17 @@ window.__ModuleLoader__.load({
           dsh-anim-fade-in ${T.pageFade}ms var(--dsh-anim-ease) both,
           dsh-anim-blur-in ${T.pageBlur}ms var(--dsh-anim-ease) both !important;
       }
+      /* Large surfaces (a long transcript) skip the blur and only fade. */
+      .${CLS.pageFade} {
+        animation: dsh-anim-fade-in ${T.pageFade}ms var(--dsh-anim-ease) both !important;
+      }
 
-      [${MOTION_SCOPE}] {
+      [${MOTION_SCOPE}="collapse"] {
         pointer-events: none !important;
       }
 
       @media (prefers-reduced-motion: reduce) {
         .${CLS.disclosure},
-        .${CLS.chevron},
-        .${CLS.chevronOut},
         .${CLS.menuEnterUp},
         .${CLS.menuEnterDown},
         .${CLS.menuEnterRight},
@@ -250,6 +237,7 @@ window.__ModuleLoader__.load({
         .${CLS.overlayEnter},
         .${CLS.overlayExit},
         .${CLS.pageEnter},
+        .${CLS.pageFade},
         .${CLS.sectionEnter},
         .${CLS.sectionBlur} {
           animation: none !important;
@@ -269,11 +257,58 @@ window.__ModuleLoader__.load({
       return value instanceof HTMLElement
     }
 
-    /** @param {string} value @returns {string} a valid CSS.escape operand */
-    function escapeAttribute(value) {
-      return typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
-        ? CSS.escape(value)
-        : value.replace(/["\\]/g, '\\$&')
+    /**
+     * Read an element's rendered rotation in degrees. Only a pure rotation is
+     * accepted: a matrix with scale, skew or translation would be lost by the
+     * arrow animation, so those report `null` and no animation runs.
+     * @param {Element} element
+     * @returns {number | null} degrees, or null when the transform is not a pure rotation
+     */
+    function rotationOf(element) {
+      const raw = getComputedStyle(element).transform
+      if (raw === '' || raw === 'none') return 0
+      const match = /^matrix\(([^)]+)\)$/.exec(raw)
+      if (match === null) return null
+      const parts = match[1].split(',').map(Number)
+      if (parts.length !== 6 || parts.some(Number.isNaN)) return null
+      const [a, b, c, d, e, f] = parts
+      if (Math.abs(a * a + b * b - 1) > 0.01 || Math.abs(c * c + d * d - 1) > 0.01) return null
+      if (Math.abs(e) > 0.5 || Math.abs(f) > 0.5) return null
+      return Math.round(Math.atan2(b, a) * (180 / Math.PI) * 10) / 10
+    }
+
+    /**
+     * The arrow DSH itself marks as a chevron. Never fall back to "the first
+     * svg in the row": disclosure rows routinely start with a tool icon, and
+     * spinning that is worse than no flourish at all.
+     * @param {Element | null | undefined} container
+     * @returns {Element | null}
+     */
+    function chevronOf(container) {
+      if (!(container instanceof Element)) return null
+      return container.querySelector(CHEVRON_SELECTOR)
+    }
+
+    /**
+     * Capture the facts a replayed click must keep so handlers that read the
+     * event still see the original pointer, button and modifier state.
+     * @param {MouseEvent} event
+     * @returns {MouseEventInit}
+     */
+    function clickFacts(event) {
+      return {
+        detail: event.detail || 1,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        screenX: event.screenX,
+        screenY: event.screenY,
+        button: event.button,
+        buttons: event.buttons,
+        ctrlKey: event.ctrlKey,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        metaKey: event.metaKey,
+      }
     }
 
     /**
@@ -313,6 +348,10 @@ window.__ModuleLoader__.load({
       const menuClassTimers = new Map()
       const groupTitleStates = new Map()
       const closing = new WeakSet()
+      // Per collapsible root: the user's latest action, so a delayed replay can
+      // tell that they already changed their mind instead of overruling them.
+      const lastIntent = new WeakMap()
+      const transitionListeners = new Set()
 
       let disposed = false
       let replaying = false
@@ -324,6 +363,7 @@ window.__ModuleLoader__.load({
       let mainSlot = null
       let sidebarSlot = null
       let bootListener
+      let geometryFrame = 0
 
       /** @param {() => void} fn @param {number} delay @returns {number} timer id */
       function later(fn, delay) {
@@ -393,7 +433,7 @@ window.__ModuleLoader__.load({
       /**
        * Open one element from zero height on KoWork's disclosure curve.
        * @param {HTMLElement} element
-       * @param {string} [kind]
+       * @param {string} [kind] recorded on the element for debugging only
        * @returns {boolean} whether an animation started
        */
       function revealElement(element, kind = 'content') {
@@ -425,7 +465,8 @@ window.__ModuleLoader__.load({
         element.style.willChange = 'height, margin-top, margin-bottom, opacity, filter, transform'
         void element.offsetHeight
         element.classList.add(CLS.disclosure)
-        element.setAttribute(MOTION_SCOPE, kind)
+        element.setAttribute(MOTION_SCOPE, 'reveal')
+        element.setAttribute('data-dsh-anim-kind', kind)
 
         let frame = 0
         const finish = () => {
@@ -445,6 +486,7 @@ window.__ModuleLoader__.load({
           element.style.overflowY = previous.overflowY
           element.style.willChange = previous.willChange
           element.removeAttribute(MOTION_SCOPE)
+          element.removeAttribute('data-dsh-anim-kind')
         }
         revealStates.set(element, { finish })
         frame = requestAnimationFrame(() => {
@@ -516,6 +558,7 @@ window.__ModuleLoader__.load({
         const cleanup = () => {
           if (cleaned) return
           cleaned = true
+          detachTransition()
           element.classList.remove(CLS.disclosure)
           element.style.height = previous.height
           element.style.marginTop = previous.marginTop
@@ -528,19 +571,25 @@ window.__ModuleLoader__.load({
           element.style.pointerEvents = previous.pointerEvents
           element.style.willChange = previous.willChange
           element.removeAttribute(MOTION_SCOPE)
+          element.removeAttribute('data-dsh-anim-kind')
         }
         const finish = () => {
           if (settled) return
           settled = true
           clearLater(timer)
-          element.removeEventListener('transitionend', onTransitionEnd)
+          detachTransition()
           closing.delete(element)
           onFinished(cleanup)
         }
         const onTransitionEnd = (event) => {
           if (event.target === element && event.propertyName === 'height') finish()
         }
+        const detachTransition = () => {
+          element.removeEventListener('transitionend', onTransitionEnd)
+          transitionListeners.delete(detachTransition)
+        }
         element.addEventListener('transitionend', onTransitionEnd)
+        transitionListeners.add(detachTransition)
         void element.offsetHeight
         element.style.height = '0px'
         element.style.marginTop = '0px'
@@ -588,23 +637,48 @@ window.__ModuleLoader__.load({
         return started
       }
 
-      /** @param {HTMLElement} container */
-      function playChevron(container) {
-        const svg = container.querySelector('svg')
-        if (svg === null || !(svg instanceof SVGElement)) return
-        playClassOnce(svg, CLS.chevron, T.chevron + 80)
-      }
-
-      /** @param {HTMLElement} container */
-      function playChevronOut(container) {
-        if (disposed || reducedMotion()) return
-        const svg = container.querySelector('svg')
-        if (svg === null || !(svg instanceof SVGElement)) return
-        playClassOnce(svg, CLS.chevronOut, T.chevron + 80)
+      /**
+       * Play the arrow's own rotation as a measured delta instead of a fixed
+       * 0°/180° keyframe pair. The angle before React commits is read now, the
+       * committed angle is read two frames later, and the two are interpolated
+       * with the Web Animations API. DSH keeps ownership: if the angle is still
+       * moving, DSH is transitioning the arrow itself and we stay out of the
+       * way; if nothing moved there is nothing to play.
+       * @param {Element | null | undefined} marker
+       */
+      function scheduleChevron(marker) {
+        if (disposed || reducedMotion() || !(marker instanceof Element) || !marker.isConnected) return
+        const from = rotationOf(marker)
+        if (from === null) return
+        requestAnimationFrame(() => {
+          if (disposed || !marker.isConnected) return
+          const first = rotationOf(marker)
+          requestAnimationFrame(() => {
+            if (disposed || !marker.isConnected || first === null) return
+            const settled = rotationOf(marker)
+            if (settled === null) return
+            // Still moving: DSH owns this transition, do not fight it.
+            if (settled !== first) return
+            if (Math.abs(settled - from) < 1) return
+            try {
+              const animation = marker.animate(
+                [{ transform: `rotate(${from}deg)` }, { transform: `rotate(${settled}deg)` }],
+                { duration: T.chevron, easing: EASE, fill: 'none' },
+              )
+              animation.addEventListener('finish', () => animation.cancel(), { once: true })
+            } catch {
+              // WAAPI unavailable or the element rejects the keyframes.
+            }
+          })
+        })
       }
 
       /** @param {HTMLElement} root @param {HTMLElement} header */
       function disclosureContent(root, header) {
+        const content = root.querySelector('[data-disclosure-content]')
+        if (content instanceof HTMLElement) return [content]
+        // Fallback: every direct child of the disclosure root is a collapsible
+        // content box; the header is the only non-content child.
         return Array.from(root.children).filter(child => child !== header)
       }
 
@@ -677,11 +751,9 @@ window.__ModuleLoader__.load({
         const header = root.querySelector(DISCLOSURE_HEADER)
         if (!(header instanceof HTMLElement)) return
         const content = disclosureContent(root, header)
-        if (content.length === 0) return
         for (const element of content) {
           if (isElement(element)) revealElement(element, 'disclosure')
         }
-        playChevron(header.querySelector(DISCLOSURE_ROW) ?? header)
       }
 
       /**
@@ -699,12 +771,57 @@ window.__ModuleLoader__.load({
         return row
       }
 
+      /**
+       * Record the user's latest action on a collapsible root. A delayed replay
+       * consults it: a click that asked to open again wins, while a repeated
+       * "close" click does not cancel the collapse already running.
+       * @param {HTMLElement} root
+       * @param {'open' | 'close'} action
+       */
+      function bumpIntent(root, action) {
+        lastIntent.set(root, action)
+      }
+
+      /**
+       * Re-resolve the group toggle in the live tree: streaming output can
+       * replace the row while the collapse animation runs.
+       * @param {HTMLElement} root
+       * @returns {HTMLElement | null}
+       */
+      function liveGroupToggle(root) {
+        if (!root.isConnected) return null
+        return root.querySelector('button[aria-controls]')
+      }
+
+      /**
+       * @param {HTMLElement} root
+       * @returns {HTMLElement | null} the disclosure row inside this root
+       */
+      function liveDisclosureRow(root) {
+        if (!root.isConnected) return null
+        const header = root.querySelector(DISCLOSURE_HEADER)
+        return header instanceof HTMLElement ? header.querySelector(DISCLOSURE_ROW) : null
+      }
+
+      /**
+       * @param {HTMLElement} root
+       * @returns {HTMLElement | null} the disclosure toggle element, if any
+       */
+      function liveDisclosureToggle(root) {
+        const row = liveDisclosureRow(root)
+        if (!(row instanceof HTMLElement)) return null
+        const leading = row.querySelector(':scope > button[aria-expanded]')
+        if (leading instanceof HTMLElement) return leading
+        return row.hasAttribute('data-expandable') ? row : null
+      }
+
       /** @param {MouseEvent} event */
       function handleClick(event) {
         if (disposed || replaying || window[REPLAY_KEY] === true || reducedMotion() || event.defaultPrevented) return
         const target = event.target
         if (!(target instanceof Element)) return
         const collapsing = (element) => element.getAttribute(MOTION_SCOPE) === 'collapse'
+        const facts = clickFacts(event)
 
         // Whole-Turn process summary: only the chevron flourish is ours.
         // Opening and closing the outer fold are left entirely to DSH. A
@@ -715,7 +832,7 @@ window.__ModuleLoader__.load({
         const turnButton = target.closest('button[data-turn-process]')
         if (turnButton instanceof HTMLElement && !turnButton.disabled
           && turnButton.getAttribute('aria-expanded') !== 'true') {
-          requestAnimationFrame(() => playChevron(turnButton))
+          scheduleChevron(chevronOf(turnButton))
         }
 
         // One process group: collapse its capped body.
@@ -727,6 +844,7 @@ window.__ModuleLoader__.load({
           if (root instanceof HTMLElement && body instanceof HTMLElement
             && body.matches(STEP_PROCESS_BODY) && root.contains(body)) {
             if (groupButton.getAttribute('aria-expanded') === 'true') {
+              bumpIntent(root, 'close')
               if (collapsing(body)) {
                 event.preventDefault()
                 event.stopImmediatePropagation()
@@ -735,16 +853,26 @@ window.__ModuleLoader__.load({
               if (!body.hasAttribute('hidden') && body.closest(CHAT_MOTION_SCOPE) === null) {
                 event.preventDefault()
                 event.stopImmediatePropagation()
-                playChevronOut(groupButton)
                 const titleCleanup = collapseGroupTitle(groupButton)
                 collapseMany([body], () => {
-                  replayClick(groupButton)
+                  // Replay only while closing is still the right action: a new
+                  // open click, or React already committing the closed state,
+                  // must win over this delayed click.
+                  // Prefer the element the user actually clicked; only fall
+                  // back to re-resolving when a render replaced it.
+                  const live = groupButton.isConnected ? groupButton : liveGroupToggle(root)
+                  if (lastIntent.get(root) === 'close' && live !== null
+                    && live.getAttribute('aria-expanded') === 'true') {
+                    scheduleChevron(chevronOf(root))
+                    replayClick(live, facts)
+                  }
                   titleCleanup()
                 })
                 return
               }
             } else {
-              requestAnimationFrame(() => playChevron(groupButton))
+              bumpIntent(root, 'open')
+              scheduleChevron(chevronOf(root))
             }
           }
         }
@@ -754,32 +882,56 @@ window.__ModuleLoader__.load({
         if (row instanceof HTMLElement) {
           const header = row.closest(DISCLOSURE_HEADER)
           const root = header instanceof HTMLElement ? header.parentElement : null
-          if (root instanceof HTMLElement && root.hasAttribute('data-open')) {
-            const toggle = disclosureToggle(row, target)
-            if (toggle === null) return
-            const content = disclosureContent(root, header)
-            if (content.length === 0) return
+          if (!(root instanceof HTMLElement)) return
+          const toggle = disclosureToggle(row, target)
+          if (!root.hasAttribute('data-open')) {
+            // Opening is DSH's; we only add the arrow flourish, measured from
+            // the angle the row has right now (before React commits).
+            if (toggle !== null) {
+              bumpIntent(root, 'open')
+              scheduleChevron(chevronOf(row))
+            }
+            return
+          }
+          if (toggle === null) return
+          const content = disclosureContent(root, header)
+          if (content.length === 0) return
+          bumpIntent(root, 'close')
+          if (content.some(element => collapsing(element))) {
             event.preventDefault()
             event.stopImmediatePropagation()
-            if (content.some(element => collapsing(element))) return
-            playChevronOut(header.querySelector(DISCLOSURE_ROW) ?? header)
-            collapseMany(content.filter(isElement), () => replayClick(toggle))
+            return
           }
+          event.preventDefault()
+          event.stopImmediatePropagation()
+          collapseMany(content.filter(isElement), () => {
+            const live = toggle.isConnected ? toggle : liveDisclosureToggle(root)
+            if (lastIntent.get(root) !== 'close' || live === null || !root.hasAttribute('data-open')) return
+            scheduleChevron(chevronOf(liveDisclosureRow(root)))
+            replayClick(live, facts)
+          })
         }
       }
 
-      /** @param {HTMLElement} element */
-      function replayClick(element) {
-        if (disposed || !element.isConnected || window[REPLAY_KEY] === true) return
+      /**
+       * Replay an intercepted click on a live element, keeping the pointer,
+       * button and modifier facts the original event carried.
+       * @param {HTMLElement} element
+       * @param {MouseEventInit} facts
+       * @returns {boolean} whether a click was dispatched
+       */
+      function replayClick(element, facts = {}) {
+        if (disposed || !element.isConnected || window[REPLAY_KEY] === true) return false
         replaying = true
         window[REPLAY_KEY] = true
         try {
           element.dispatchEvent(new MouseEvent('click', {
+            ...facts,
             bubbles: true,
             cancelable: true,
             view: window,
-            detail: 1,
           }))
+          return true
         } finally {
           window[REPLAY_KEY] = false
           replaying = false
@@ -799,6 +951,9 @@ window.__ModuleLoader__.load({
         if (!force && menuMeta.has(menu)) return
         const rect = menu.getBoundingClientRect()
         if (rect.width <= 0 || rect.height <= 0) return
+        // Opaque the material only for surfaces this plugin animates; menus it
+        // never touches keep the native translucent look.
+        menu.classList.add(CLS.menuSurface)
         const trigger = nearestMenuTrigger(menu)
         const direction = trigger === null
           ? (rect.top > window.innerHeight / 2 ? 'up' : 'down')
@@ -872,12 +1027,9 @@ window.__ModuleLoader__.load({
         if (rect.width <= 0 || rect.height <= 0) return
         const ghost = menu.cloneNode(true)
         if (!(ghost instanceof HTMLElement)) return
-        ghost.removeAttribute('id')
-        ghost.setAttribute('aria-hidden', 'true')
-        ghost.setAttribute('data-dsh-anim-ghost', '')
-        ghost.removeAttribute(MOTION_SCOPE)
+        sanitizeGhost(ghost)
         ghost.classList.remove(CLS.menuEnterUp, CLS.menuEnterDown, CLS.menuEnterRight)
-        ghost.classList.add(CLS.menuExit)
+        ghost.classList.add(CLS.menuExit, CLS.menuSurface)
         ghost.style.setProperty('position', 'fixed', 'important')
         ghost.style.setProperty('left', `${rect.left}px`, 'important')
         ghost.style.setProperty('top', `${rect.top}px`, 'important')
@@ -904,8 +1056,14 @@ window.__ModuleLoader__.load({
         const rect = panel.getBoundingClientRect()
         if (rect.width <= 0 || rect.height <= 0) return
         const container = panel.parentElement
-        const mask = container === null ? null : findMask(container, panel)
-        dialogMeta.set(panel, { container, mask, rect })
+        const mask = findMask(panel)
+        // Keep the geometry: the exit ghost is cloned after the panel has left
+        // the DOM, where its own box already reads 0×0.
+        dialogMeta.set(panel, {
+          container,
+          rect,
+          containerRect: container instanceof HTMLElement ? container.getBoundingClientRect() : null,
+        })
         activeDialogs.add(panel)
         panel.classList.add(CLS.dialogEnter)
         if (mask !== null) mask.classList.add(CLS.overlayEnter)
@@ -913,58 +1071,80 @@ window.__ModuleLoader__.load({
           panel.classList.remove(CLS.dialogEnter)
           if (mask !== null) mask.classList.remove(CLS.overlayEnter)
           // The primitive's base `.dialog` rule keeps `modalEnter`; suppress a
-          // restart when our longer enter class is removed.
+          // restart when our longer enter class is removed. Cleared again when
+          // the panel leaves the DOM (see handleRemoved).
           panel.style.animation = 'none'
         }, T.dialogBlur + 60)
         if (panel.getAttribute('data-shortcut-modal') === 'settings') observeSettingsSections(panel)
       }
 
-      /** @param {HTMLElement} container @param {HTMLElement} panel @returns {HTMLElement | null} */
-      function findMask(container, panel) {
+      /**
+       * The dialog's own scrim: a sibling in its wrapper that is hidden from AT.
+       * @param {HTMLElement} container @param {HTMLElement} panel
+       * @returns {HTMLElement | null}
+       */
+      function maskIn(container, panel) {
         for (const child of container.children) {
           if (child !== panel && child instanceof HTMLElement && child.getAttribute('aria-hidden') === 'true') return child
         }
         return null
       }
 
+      /** @param {HTMLElement} panel @returns {HTMLElement | null} */
+      function findMask(panel) {
+        const container = panel.parentElement
+        return container instanceof HTMLElement ? maskIn(container, panel) : null
+      }
+
+      /**
+       * Make a clone inert and structurally unique: no ids to collide with the
+       * live tree, no automation hooks, nothing focusable or announced.
+       * @param {HTMLElement} ghost
+       */
+      function sanitizeGhost(ghost) {
+        ghost.setAttribute('aria-hidden', 'true')
+        ghost.setAttribute('data-dsh-anim-ghost', '')
+        ghost.removeAttribute('id')
+        ghost.removeAttribute('data-shortcut-modal')
+        ghost.removeAttribute(MOTION_SCOPE)
+        for (const node of ghost.querySelectorAll('[id]')) node.removeAttribute('id')
+        for (const node of ghost.querySelectorAll('[data-shortcut-modal]')) node.removeAttribute('data-shortcut-modal')
+        ghost.inert = true
+      }
+
       /** @param {HTMLElement} panel */
       function ghostDialog(panel) {
+        disconnectSettingsSections(panel)
         if (disposed || reducedMotion()) return
         const meta = dialogMeta.get(panel)
         const container = meta?.container
         const source = container instanceof HTMLElement && container !== document.body && container.contains(panel)
           ? container
           : panel
-        const rect = meta?.rect ?? panel.getBoundingClientRect()
-        if (rect.width <= 0 || rect.height <= 0) return
-        disconnectSettingsSections(panel)
+        const box = source === panel
+          ? (meta?.rect ?? panel.getBoundingClientRect())
+          : (meta?.containerRect ?? source.getBoundingClientRect())
+        if (box.width <= 0 || box.height <= 0) return
         const ghost = source.cloneNode(true)
         if (!(ghost instanceof HTMLElement)) return
-        ghost.setAttribute('aria-hidden', 'true')
-        ghost.setAttribute('data-dsh-anim-ghost', '')
-        ghost.removeAttribute(MOTION_SCOPE)
+        sanitizeGhost(ghost)
+        ghost.style.setProperty('position', 'fixed', 'important')
+        ghost.style.setProperty('left', `${box.left}px`, 'important')
+        ghost.style.setProperty('top', `${box.top}px`, 'important')
+        ghost.style.setProperty('width', `${box.width}px`, 'important')
+        ghost.style.setProperty('height', `${box.height}px`, 'important')
+        ghost.style.setProperty('margin', '0', 'important')
         ghost.style.setProperty('pointer-events', 'none', 'important')
         ghost.style.setProperty('z-index', '990', 'important')
-        if (source === panel) {
-          ghost.style.setProperty('position', 'fixed', 'important')
-          ghost.style.setProperty('left', `${rect.left}px`, 'important')
-          ghost.style.setProperty('top', `${rect.top}px`, 'important')
-          ghost.style.setProperty('width', `${rect.width}px`, 'important')
-          ghost.style.setProperty('height', `${rect.height}px`, 'important')
-          ghost.style.setProperty('margin', '0', 'important')
-        } else {
-          ghost.style.setProperty('position', 'fixed', 'important')
-          ghost.style.setProperty('inset', '0', 'important')
-        }
         const clonedPanel = ghost.matches(DIALOG_SELECTOR) ? ghost : ghost.querySelector(DIALOG_SELECTOR)
         if (clonedPanel instanceof HTMLElement) {
           clonedPanel.classList.remove(CLS.dialogEnter)
           clonedPanel.style.animation = ''
           clonedPanel.classList.add(CLS.dialogExit)
         }
-        const clonedMask = source === panel
+        const clonedMask = source === panel || !(clonedPanel instanceof HTMLElement)
           ? null
-          : findMask(ghost, clonedPanel instanceof HTMLElement ? clonedPanel : ghost)
+          : findMask(clonedPanel)
         if (clonedMask !== null) {
           clonedMask.classList.remove(CLS.overlayEnter)
           clonedMask.classList.add(CLS.overlayExit)
@@ -977,12 +1157,26 @@ window.__ModuleLoader__.load({
         }, T.dialogExit + 80)
       }
 
+      /**
+       * The settings slot outlet. It is a confirmed slot key, so prefer it over
+       * guessing the dialog's DOM shape; the structural fallback only exists for
+       * older shells.
+       * @param {HTMLElement} panel
+       * @returns {HTMLElement | null}
+       */
+      function settingsOutlet(panel) {
+        const outlet = panel.querySelector('[data-slot="settings.section"]')
+        if (outlet instanceof HTMLElement) return outlet
+        const content = panel.lastElementChild
+        const options = content?.lastElementChild
+        return options instanceof HTMLElement ? options : null
+      }
+
       /** @param {HTMLElement} panel */
       function observeSettingsSections(panel) {
         if (disposed || settingsObservers.has(panel)) return
-        const content = panel.lastElementChild
-        const options = content?.lastElementChild
-        if (!(options instanceof HTMLElement)) return
+        const outlet = settingsOutlet(panel)
+        if (outlet === null) return
         let pending = false
         const observer = new MutationObserver(() => {
           if (disposed || pending) return
@@ -992,7 +1186,7 @@ window.__ModuleLoader__.load({
             if (!disposed) animateSettingsSection(panel)
           })
         })
-        observer.observe(options, { childList: true, subtree: true })
+        observer.observe(outlet, { childList: true })
         settingsObservers.set(panel, observer)
         animateSettingsSection(panel)
       }
@@ -1005,18 +1199,14 @@ window.__ModuleLoader__.load({
        */
       function animateSettingsSection(panel) {
         if (disposed || reducedMotion() || !panel.isConnected) return
-        const outlet = panel.querySelector('[data-slot="settings.section"]')
-        let surface = outlet instanceof HTMLElement ? visibleSurface(outlet) : null
-        if (surface === null) {
-          const content = panel.lastElementChild
-          const options = content?.lastElementChild
-          const first = options?.firstElementChild
-          surface = first instanceof HTMLElement ? visibleSurface(first) : null
-        }
+        const outlet = settingsOutlet(panel)
+        const first = outlet?.firstElementChild
+        const surface = first instanceof HTMLElement ? visibleSurface(first) : null
         if (surface === null) return
         if (settingsSectionSurfaces.get(panel) === surface) return
         settingsSectionSurfaces.set(panel, surface)
-        playClassOnce(surface, CLS.sectionBlur, 300)
+        // The CSS animation is 240ms; drop the class a beat after it finishes.
+        playClassOnce(surface, CLS.sectionBlur, 240 + 40)
       }
 
       /** @param {HTMLElement} panel */
@@ -1047,12 +1237,25 @@ window.__ModuleLoader__.load({
         return null
       }
 
+      /**
+       * `filter` repaints the whole subtree, so a long transcript pays for the
+       * blur on every frame. Big surfaces only fade.
+       * @param {HTMLElement} surface
+       * @param {string} blurClass
+       */
+      function playEnter(surface, blurClass) {
+        const className = surface.querySelectorAll('*').length <= BLUR_NODE_BUDGET
+          ? blurClass
+          : CLS.pageFade
+        playClassOnce(surface, className, T.pageBlur + 60)
+      }
+
       /** @param {HTMLElement} element */
       function animatePage(element) {
         if (disposed || reducedMotion()) return
         const surface = visibleSurface(element)
         if (surface === null) return
-        playClassOnce(surface, CLS.pageEnter, T.pageBlur + 60)
+        playEnter(surface, CLS.pageEnter)
       }
 
       /** @param {HTMLElement} element */
@@ -1060,7 +1263,7 @@ window.__ModuleLoader__.load({
         if (disposed || reducedMotion()) return
         const surface = visibleSurface(element)
         if (surface === null) return
-        playClassOnce(surface, CLS.sectionEnter, T.pageBlur + 60)
+        playEnter(surface, CLS.sectionEnter)
       }
 
       /**
@@ -1135,18 +1338,39 @@ window.__ModuleLoader__.load({
         for (const menu of [...activeMenus]) {
           if (node === menu || node.contains(menu)) {
             activeMenus.delete(menu)
+            const timer = menuClassTimers.get(menu)
+            if (timer !== undefined) {
+              clearLater(timer)
+              menuClassTimers.delete(menu)
+            }
+            // Snapshot first: the ghost needs the geometry recorded while the
+            // menu was still on screen.
             ghostMenu(menu)
+            menuMeta.delete(menu)
           }
         }
         for (const panel of [...activeDialogs]) {
           if (node === panel || node.contains(panel)) {
             activeDialogs.delete(panel)
+            disconnectSettingsSections(panel)
+            panel.style.animation = ''
+            // Same ordering rule as menus: the ghost reads the stored box.
             ghostDialog(panel)
+            dialogMeta.delete(panel)
           }
+        }
+        // A settings panel can lose its observer without ever becoming an
+        // active dialog (reduced motion, no enter animation); never keep an
+        // observer on a detached subtree.
+        for (const panel of [...settingsObservers.keys()]) {
+          if (node === panel || node.contains(panel) || !panel.isConnected) disconnectSettingsSections(panel)
         }
       }
 
-      /** Update stored geometry while a menu/dialog is open and the page moves. */
+      /**
+       * Snapshot menu geometry while a menu is still open and the page moves.
+       * Only menus need it: their exit ghost starts from the pre-close box.
+       */
       function refreshGeometry() {
         if (disposed) return
         for (const menu of activeMenus) {
@@ -1160,8 +1384,21 @@ window.__ModuleLoader__.load({
         for (const panel of activeDialogs) {
           if (!panel.isConnected) continue
           const meta = dialogMeta.get(panel)
-          if (meta !== undefined) meta.rect = panel.getBoundingClientRect()
+          if (meta === undefined) continue
+          meta.rect = panel.getBoundingClientRect()
+          if (meta.container instanceof HTMLElement && meta.container.isConnected) {
+            meta.containerRect = meta.container.getBoundingClientRect()
+          }
         }
+      }
+
+      /** Coalesce the scroll/resize geometry refreshes into one frame. */
+      function scheduleGeometry() {
+        if (disposed || geometryFrame) return
+        geometryFrame = requestAnimationFrame(() => {
+          geometryFrame = 0
+          refreshGeometry()
+        })
       }
 
       function installObservers() {
@@ -1189,16 +1426,15 @@ window.__ModuleLoader__.load({
             const target = record.target
             if (!(target instanceof HTMLElement) || target.hasAttribute('hidden')) continue
             if (target.closest(CHAT_MOTION_SCOPE) !== null) continue
-            if (target.matches(STEP_PROCESS) || target.matches(STEP_PROCESS_BODY)) {
-              if (target.matches(STEP_PROCESS_BODY)) {
-                const root = target.closest(STEP_PROCESS)
-                const chevron = root?.querySelector('[data-step-process-chevron]')
-                if (chevron instanceof HTMLElement) playChevron(chevron)
-                const button = root?.querySelector('button[aria-controls]')
-                if (button instanceof HTMLElement) expandGroupTitle(button)
-              }
-              revealElement(target, target.matches(STEP_PROCESS_BODY) ? 'group-body' : 'group-root')
-            }
+            // Only the innermost body owns the height animation. Animating the
+            // group root as well nested two height transitions on the same
+            // pixels, and made the whole group (header included) swallow clicks
+            // through the pointer-events guard.
+            if (!target.matches(STEP_PROCESS_BODY)) continue
+            const root = target.closest(STEP_PROCESS)
+            const button = root?.querySelector('button[aria-controls]')
+            if (button instanceof HTMLElement) expandGroupTitle(button)
+            revealElement(target, 'group-body')
           }
         })
         hiddenObserver.observe(document.documentElement, {
@@ -1230,9 +1466,13 @@ window.__ModuleLoader__.load({
         // handlers run, so the exit ghost starts from the box on screen.
         on(document, 'pointerdown', refreshGeometry, true)
         on(document, 'keydown', refreshGeometry, true)
-        on(window, 'scroll', refreshGeometry, true)
-        on(window, 'resize', refreshGeometry)
-        on(window, 'pagehide', () => dispose())
+        on(window, 'scroll', scheduleGeometry, true)
+        on(window, 'resize', scheduleGeometry)
+        // bfcache restores never re-run this bundle, so only a real unload may
+        // tear the layer down.
+        on(window, 'pagehide', event => {
+          if (!event.persisted) dispose()
+        })
         ensureSlots()
       }
 
@@ -1258,6 +1498,12 @@ window.__ModuleLoader__.load({
         }
         for (const timer of timers) window.clearTimeout(timer)
         timers.clear()
+        if (geometryFrame) {
+          cancelAnimationFrame(geometryFrame)
+          geometryFrame = 0
+        }
+        for (const detach of [...transitionListeners]) detach()
+        transitionListeners.clear()
         for (const state of [...revealStates.values()]) state.finish()
         revealStates.clear()
         // Unload mid-collapse must not leave a box stuck at height 0: the
@@ -1269,12 +1515,14 @@ window.__ModuleLoader__.load({
             element.style[property] = ''
           }
           element.removeAttribute(MOTION_SCOPE)
+          element.removeAttribute('data-dsh-anim-kind')
         }
         for (const ghost of ghosts) ghost.remove()
         ghosts.clear()
         for (const menu of activeMenus) {
           menu.classList.remove(CLS.menuEnterUp, CLS.menuEnterDown, CLS.menuEnterRight, CLS.menuExit)
         }
+        for (const menu of document.querySelectorAll(`.${CLS.menuSurface}`)) menu.classList.remove(CLS.menuSurface)
         activeMenus.clear()
         menuMeta.clear()
         menuClassTimers.clear()
